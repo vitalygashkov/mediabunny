@@ -29,6 +29,9 @@ import {
 } from './hls-misc';
 
 const IV_STRING_REGEX = /^0[xX][0-9a-fA-F]+$/;
+const ABSOLUTE_URI_REGEX = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+
+type HlsEncryptionMethod = 'AES-128' | 'SAMPLE-AES' | 'SAMPLE-AES-CTR';
 
 export type HlsSegment = Segment & {
 	sequenceNumber: number | null;
@@ -40,10 +43,12 @@ export type HlsSegment = Segment & {
 };
 
 export type HlsEncryptionInfo = {
-	method: 'AES-128';
+	method: HlsEncryptionMethod;
 	keyUri: string;
 	iv: Uint8Array | null;
 	keyFormat: string;
+	keyFormatVersions: string;
+	keyId: string | null;
 };
 
 export type HlsSegmentLocation = {
@@ -135,6 +140,45 @@ export class HlsSegmentedInput extends SegmentedInput {
 		// Used for repeated parses where our job it is to only add the new segments
 		let prevLastSegment = last(this.segments) ?? null;
 
+		const parseIv = (ivString: string) => {
+			if (!IV_STRING_REGEX.test(ivString)) {
+				throw new Error(`Unsupported IV format '${ivString}'.`);
+			}
+
+			let hex = ivString.slice(2);
+			hex = hex.slice(-AES_128_BLOCK_SIZE * 2).padStart(AES_128_BLOCK_SIZE * 2, '0');
+
+			const iv = new Uint8Array(AES_128_BLOCK_SIZE);
+			for (let i = 0; i < AES_128_BLOCK_SIZE; i++) {
+				const startIndex = i * 2;
+				iv[i] = parseInt(hex.slice(startIndex, startIndex + 2), 16);
+			}
+
+			return iv;
+		};
+
+		const resolveKeyUri = (uri: string) => {
+			return ABSOLUTE_URI_REGEX.test(uri) ? uri : joinPaths(this.path, uri);
+		};
+
+		const parseKey = (attributes: AttributeList, method: HlsEncryptionMethod): HlsEncryptionInfo => {
+			const uri = attributes.get('uri');
+			if (!uri) {
+				throw new Error(`Invalid #EXT-X-KEY: ${method} requires a URI attribute.`);
+			}
+
+			const ivString = attributes.get('iv');
+
+			return {
+				method,
+				keyUri: resolveKeyUri(uri),
+				iv: ivString ? parseIv(ivString) : null,
+				keyFormat: attributes.get('keyformat') ?? 'identity',
+				keyFormatVersions: attributes.get('keyformatversions') ?? '1',
+				keyId: attributes.get('keyid'),
+			};
+		};
+
 		const parseByteRange = (content: string) => {
 			const atIndex = content.indexOf('@');
 
@@ -191,7 +235,7 @@ export class HlsSegmentedInput extends SegmentedInput {
 					}
 
 					let key = currentKey;
-					if (key && !key.iv) {
+					if (key && !key.iv && key.keyFormat === 'identity') {
 						// "the Media Sequence Number is to be used as the IV when decrypting a Media Segment, by
 						// putting its big-endian binary representation into a 16-octet (128-bit) buffer and padding
 						// (on the left) with zeros"
@@ -328,34 +372,11 @@ export class HlsSegmentedInput extends SegmentedInput {
 				if (method === 'NONE') {
 					currentKey = null;
 				} else if (method === 'AES-128') {
-					const uri = attributes.get('uri');
-					if (!uri) {
-						throw new Error('Invalid #EXT-X-KEY: AES-128 requires a URI attribute.');
-					}
-
-					let iv: Uint8Array | null = null;
-					const ivString = attributes.get('iv');
-					if (ivString) {
-						if (!IV_STRING_REGEX.test(ivString)) {
-							throw new Error(`Unsupported IV format '${ivString}'.`);
-						}
-
-						let hex = ivString.slice(2);
-						hex = hex.padStart(AES_128_BLOCK_SIZE * 2, '0');
-
-						iv = new Uint8Array(AES_128_BLOCK_SIZE);
-						for (let i = 0; i < AES_128_BLOCK_SIZE; i++) {
-							const startIndex = -AES_128_BLOCK_SIZE * 2 + i;
-							iv[i] = parseInt(hex.slice(startIndex, startIndex + 2), 16);
-						}
-					}
-
-					currentKey = {
-						method: 'AES-128',
-						keyUri: joinPaths(this.path, uri),
-						iv,
-						keyFormat: attributes.get('keyformat') ?? 'identity',
-					};
+					currentKey = parseKey(attributes, method);
+				} else if (method === 'SAMPLE-AES') {
+					currentKey = parseKey(attributes, method);
+				} else if (method === 'SAMPLE-AES-CTR') {
+					currentKey = parseKey(attributes, method);
 				} else {
 					throw new Error(
 						`Unsupported encryption method '${method}'. If you think this method should be supported,`
@@ -526,6 +547,12 @@ export class HlsSegmentedInput extends SegmentedInput {
 
 	getInputForSegment(segment: Segment): Input {
 		const hlsSegment = segment as HlsSegment;
+
+		if (hlsSegment.encryption && hlsSegment.encryption.method !== 'AES-128') {
+			throw new Error(
+				`HLS segments encrypted with ${hlsSegment.encryption.method} are not supported for media reading.`,
+			);
+		}
 
 		const cacheEntry = this.inputCache.find(x => x.segment === hlsSegment);
 		if (cacheEntry) {

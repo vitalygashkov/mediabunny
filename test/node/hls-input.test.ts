@@ -1,8 +1,12 @@
 /* eslint-disable @stylistic/max-len */
 import { ALL_FORMATS, BufferSource, createInputFrom, EncodedPacketSink, Input, InputAudioTrack, InputVideoTrack, PathedSource } from 'mediabunny';
 import { expect, test } from 'vitest';
+import { HlsDemuxer } from '../../src/hls/hls-demuxer.js';
+import { HlsSegmentedInput } from '../../src/hls/hls-segmented-input.js';
+import { Input as InternalInput } from '../../src/input.js';
 import { HLS, HlsInputFormat } from '../../src/input-format.js';
 import { assert, rejectAfter } from '../../src/misc.js';
+import { BufferSource as InternalBufferSource, PathedSource as InternalPathedSource } from '../../src/source.js';
 
 // A lot of test cases taken from:
 // https://github.com/video-dev/hls.js/blob/master/tests/test-streams.js
@@ -336,6 +340,64 @@ test.concurrent('Custom IV', { timeout: 15_000 }, async () => {
 
 	expect(sourceCount).toBe(3); // Entry, first segment, and encryption key
 });
+
+test.concurrent.each(['SAMPLE-AES', 'SAMPLE-AES-CTR'] as const)(
+	'SAMPLE-AES encryption details are parsed but media reading is rejected (%s)',
+	async (method) => {
+		const keyUri = 'data:text/plain;base64,QUJDREVGR0hJSktMTU5PUA==';
+		const keyId = '0x00112233445566778899aabbccddeeff';
+		const segmentBytes = new Uint8Array([0, 1, 2, 3, 4, 5]);
+
+		let keyWasRequested = false;
+
+		const input = new InternalInput({
+			formats: [],
+			source: new InternalPathedSource('https://example.com/hls/playlist.m3u8', (request) => {
+				if (request.path === 'https://example.com/hls/segment.ts') {
+					return new InternalBufferSource(segmentBytes);
+				}
+
+				if (request.path === keyUri) {
+					keyWasRequested = true;
+				}
+
+				throw new Error(`Unexpected source request for ${request.path}.`);
+			}),
+		});
+
+		const lines = [
+			'#EXTM3U',
+			'#EXT-X-TARGETDURATION:2',
+			`#EXT-X-KEY:METHOD=${method},URI="${keyUri}",IV=0x000102030405060708090a0b0c0d0e0f,`
+			+ `KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",KEYFORMATVERSIONS="1/2",`
+			+ `KEYID=${keyId}`,
+			'#EXTINF:2,',
+			'segment.ts',
+			'#EXT-X-ENDLIST',
+		];
+
+		const segmentedInput = new HlsSegmentedInput(
+			new HlsDemuxer(input),
+			'https://example.com/hls/playlist.m3u8',
+			null,
+			lines,
+		);
+		await segmentedInput.updateSegments();
+
+		const segment = segmentedInput.segments[0]!;
+		const encryption = segment.encryption;
+		assert(encryption);
+		expect(encryption.method).toBe(method);
+		expect(encryption.keyUri).toBe(keyUri);
+		expect(encryption.keyFormat).toBe('urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed');
+		expect(encryption.keyFormatVersions).toBe('1/2');
+		expect(encryption.keyId).toBe(keyId);
+		expect([...encryption.iv!]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+
+		expect(() => segmentedInput.getInputForSegment(segment)).toThrow(method);
+		expect(keyWasRequested).toBe(false);
+	},
+);
 
 test.concurrent('Out-of-band audio track via ADTS', { timeout: 15_000 }, async () => {
 	using input = createInputFrom('https://playertest.longtailvideo.com/adaptive/aes-with-tracks/master.m3u8', ALL_FORMATS);
