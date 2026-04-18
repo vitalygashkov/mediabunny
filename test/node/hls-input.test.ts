@@ -4,7 +4,7 @@ import { expect, test } from 'vitest';
 import { HlsDemuxer } from '../../src/hls/hls-demuxer.js';
 import { HlsSegmentedInput } from '../../src/hls/hls-segmented-input.js';
 import { Input as InternalInput } from '../../src/input.js';
-import { HLS, HlsInputFormat } from '../../src/input-format.js';
+import { HLS, HLS_FORMATS, HlsInputFormat } from '../../src/input-format.js';
 import { assert, rejectAfter } from '../../src/misc.js';
 import { BufferSource as InternalBufferSource, PathedSource as InternalPathedSource } from '../../src/source.js';
 
@@ -836,4 +836,30 @@ test.concurrent('Missing media tag codec', async () => {
 	expect(tracks.filter(x => x.type === 'audio')).toHaveLength(3);
 
 	expect([...new Set(await Promise.all(tracks.map(x => x.getCodec())))]).toEqual(['aac', 'avc']);
+});
+
+test.concurrent('Circular/recursive HLS is forbidden', async () => {
+	const text = `#EXTM3U
+#EXT-X-VERSION=3
+#EXT-X-TARGETDURATION=10
+
+#EXTINF:5,
+root.m3u8
+
+#EXT-X-ENDLIST
+`;
+
+	const input = new Input({
+		source: new PathedSource(
+			'root.m3u8',
+			({ path }) => {
+				console.log(1, path);
+				assert(path === 'root.m3u8');
+				return new BufferSource(new TextEncoder().encode(text));
+			},
+		),
+		formats: HLS_FORMATS,
+	});
+
+	await expect(input.getTracks()).rejects.toThrow('unsupported');
 });
