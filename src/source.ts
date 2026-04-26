@@ -20,12 +20,8 @@ import {
 	toDataView,
 	toUint8Array,
 } from './misc';
-import * as nodeAlias from './node';
 import { InputDisposedError } from './input';
-
-const node = typeof nodeAlias !== 'undefined'
-	? nodeAlias // Aliasing it prevents some bundler warnings
-	: undefined!;
+import { getNodeFs } from './node-fs';
 
 export type ReadResult = {
 	bytes: Uint8Array;
@@ -677,7 +673,8 @@ export class FilePathSource extends Source {
 		// Let's back this source with a StreamSource, makes the implementation very simple
 		this._streamSource = new StreamSource({
 			getSize: async () => {
-				this._fileHandle = await node.fs.open(filePath, 'r');
+				const nodeFs = await getNodeFs();
+				this._fileHandle = await nodeFs.open(filePath, 'r');
 
 				const stats = await this._fileHandle.stat();
 				return stats.size;

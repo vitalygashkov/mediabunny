@@ -9,12 +9,8 @@
 import type { FileHandle } from 'node:fs/promises';
 import { BufferTargetWriter, NullTargetWriter, StreamTargetWriter, Writer } from './writer';
 import { Output } from './output';
-import * as nodeAlias from './node';
 import { assert } from './misc';
-
-const node = typeof nodeAlias !== 'undefined'
-	? nodeAlias // Aliasing it prevents some bundler warnings
-	: undefined!;
+import { getNodeFs } from './node-fs';
 
 /**
  * Base class for targets, specifying where output files are written.
@@ -163,7 +159,8 @@ export class FilePathTarget extends Target {
 		// Let's back this target with a StreamTarget, makes the implementation very simple
 		const writable = new WritableStream<StreamTargetChunk>({
 			start: async () => {
-				this._fileHandle = await node.fs.open(filePath, 'w');
+				const nodeFs = await getNodeFs();
+				this._fileHandle = await nodeFs.open(filePath, 'w');
 			},
 			write: async (chunk) => {
 				assert(this._fileHandle);
